@@ -1058,37 +1058,44 @@ class MiniMaxTranslator(OpenAITranslator):
 class GitHubCopilotTranslator(OpenAITranslator):
     """Translate using a GitHub Copilot subscription ("coding plan").
 
-    GitHub Copilot exposes an OpenAI-compatible chat completions endpoint at
-    ``https://api.githubcopilot.com``. It is authenticated with a short-lived
-    session token that is obtained by exchanging a GitHub OAuth token (the same
-    credential the official Copilot editor plugins use). This lets users reuse
-    their paid Copilot plan as a translation backend instead of free services.
+    Calls go through `GitHub Models <https://models.github.ai>`_, the publicly
+    supported, OpenAI-compatible inference endpoint for Copilot's models. This
+    lets users reuse their paid Copilot plan (or the free GitHub Models tier) as
+    a translation backend.
 
-    Provide the OAuth token (it usually starts with ``gho_`` or ``ghu_``) through
-    the ``GITHUB_COPILOT_TOKEN`` environment variable. If it is not set, the token
-    is read from the local credential file created by the official GitHub Copilot
-    plugins (e.g. ``~/.config/github-copilot/apps.json`` or ``hosts.json``).
+    Authentication uses a GitHub personal access token (or any token that
+    grants access to GitHub Models, including the ``GITHUB_TOKEN`` available in
+    GitHub Actions) sent as a standard ``Bearer`` token. Provide it through the
+    ``GITHUB_COPILOT_TOKEN`` environment variable. As a convenience, if the
+    variable is not set, the OAuth token created by the official GitHub Copilot
+    editor plugins (``~/.config/github-copilot/apps.json`` or ``hosts.json``) is
+    used as a fallback.
+
+    The previous implementation called the editor-only endpoint
+    ``https://api.github.com/copilot_internal/v2/token`` to exchange the token
+    for a short-lived Copilot session token. That endpoint rejects regular
+    personal access tokens with ``403 Forbidden`` (it is intended only for the
+    official editor OAuth app), which broke this backend in CI and for any user
+    supplying a PAT. GitHub Models accepts PATs directly, so no exchange is
+    needed.
+
+    Model names follow the GitHub Models convention of ``<publisher>/<model>``
+    (e.g. ``openai/gpt-4o-mini``). For backward compatibility, plain OpenAI
+    model names (e.g. ``gpt-4o-mini``) are automatically prefixed with
+    ``openai/``.
     """
 
     name = "github-copilot"
     envs = {
         "GITHUB_COPILOT_TOKEN": None,
-        "GITHUB_COPILOT_MODEL": "gpt-4o-mini",
+        "GITHUB_COPILOT_MODEL": "openai/gpt-4o-mini",
     }
     CustomPrompt = True
 
-    COPILOT_API_BASE = "https://api.githubcopilot.com"
-    COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
-    # These values mimic the official GitHub Copilot editor plugins; the Copilot
-    # API requires them and they may need updating if the API changes.
-    EDITOR_VERSION = "vscode/1.95.0"
-    PLUGIN_VERSION = "copilot-chat/0.22.0"
-    USER_AGENT = "GitHubCopilotChat/0.22.0"
-    INTEGRATION_ID = "vscode-chat"
-    # Refresh the session token this many seconds before it actually expires.
-    TOKEN_REFRESH_BUFFER_SECONDS = 60
-    # Fallback session lifetime (~25 min) when the API omits "expires_at".
-    DEFAULT_SESSION_DURATION_SECONDS = 1500
+    # GitHub Models exposes an OpenAI-compatible API. The OpenAI Python client
+    # appends "/chat/completions" itself, so the base URL only needs to point at
+    # the inference root.
+    COPILOT_API_BASE = "https://models.github.ai/inference"
 
     def __init__(
         self, lang_in, lang_out, model, envs=None, prompt=None, ignore_cache=False
@@ -1096,37 +1103,30 @@ class GitHubCopilotTranslator(OpenAITranslator):
         self.set_envs(envs)
         if not model:
             model = self.envs["GITHUB_COPILOT_MODEL"]
-        self._oauth_token = (
+        # GitHub Models requires "<publisher>/<model>" identifiers. Accept bare
+        # OpenAI model names (e.g. "gpt-4o-mini") for convenience.
+        if model and "/" not in model:
+            model = f"openai/{model}"
+        token = (
             self.envs.get("GITHUB_COPILOT_TOKEN")
             or self._read_oauth_token_from_config()
         )
-        if not self._oauth_token:
+        if not token:
             raise ValueError(
-                "The GITHUB_COPILOT_TOKEN is missing. Set it to a GitHub OAuth "
-                "token with Copilot access, or sign in with an official GitHub "
-                "Copilot plugin to create the local credential file."
+                "The GITHUB_COPILOT_TOKEN is missing. Set it to a GitHub "
+                "personal access token (or the OAuth token created by an "
+                "official GitHub Copilot editor plugin) with access to "
+                "GitHub Models / Copilot."
             )
-        self._session_token = None
-        self._session_expires_at = 0
+        self._oauth_token = token
         super().__init__(
             lang_in,
             lang_out,
             model,
             base_url=self.COPILOT_API_BASE,
-            api_key="placeholder",
+            api_key=token,
             ignore_cache=ignore_cache,
             prompt=prompt,
-        )
-        # Copilot's API requires editor-style headers to accept the request.
-        self.client = openai.OpenAI(
-            base_url=self.COPILOT_API_BASE,
-            api_key="placeholder",
-            default_headers={
-                "Editor-Version": self.EDITOR_VERSION,
-                "Editor-Plugin-Version": self.PLUGIN_VERSION,
-                "Copilot-Integration-Id": self.INTEGRATION_ID,
-                "User-Agent": self.USER_AGENT,
-            },
         )
 
     @staticmethod
@@ -1148,36 +1148,6 @@ class GitHubCopilotTranslator(OpenAITranslator):
                 if isinstance(entry, dict) and entry.get("oauth_token"):
                     return entry["oauth_token"]
         return None
-
-    def _refresh_session_token(self):
-        """Exchange the OAuth token for a (cached) short-lived Copilot session token."""
-        import time
-
-        if self._session_token and time.time() < (
-            self._session_expires_at - self.TOKEN_REFRESH_BUFFER_SECONDS
-        ):
-            return
-        response = requests.get(
-            self.COPILOT_TOKEN_URL,
-            headers={
-                "Authorization": f"token {self._oauth_token}",
-                "Editor-Version": self.EDITOR_VERSION,
-                "Editor-Plugin-Version": self.PLUGIN_VERSION,
-                "User-Agent": self.USER_AGENT,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-        self._session_token = data["token"]
-        self._session_expires_at = data.get(
-            "expires_at", time.time() + self.DEFAULT_SESSION_DURATION_SECONDS
-        )
-        self.client.api_key = self._session_token
-
-    def do_translate(self, text) -> str:
-        self._refresh_session_token()
-        return super().do_translate(text)
 
 
 class OpenAIlikedTranslator(OpenAITranslator):
