@@ -162,7 +162,7 @@ class TestGitHubCopilotTranslator(unittest.TestCase):
         ConfigManager.clear()
         self.default_envs = {
             "GITHUB_COPILOT_TOKEN": "ghp_testtoken",
-            "GITHUB_COPILOT_MODEL": "openai/gpt-4o-mini",
+            "GITHUB_COPILOT_MODEL": "gpt-4.1",
         }
 
     def test_missing_token_raises_error(self):
@@ -177,42 +177,100 @@ class TestGitHubCopilotTranslator(unittest.TestCase):
         self.assertIn("GITHUB_COPILOT_TOKEN is missing", str(context.exception))
 
     def test_initialization_with_token(self):
-        """使用有效的 token 初始化：作为 Bearer token 直接调用 GitHub Models"""
-        translator = GitHubCopilotTranslator(
-            lang_in="en", lang_out="zh", model=None, envs=self.default_envs
-        )
+        """使用有效 token 初始化 Copilot SDK 会话"""
+        mock_response = mock.Mock()
+        mock_response.data.content = "你好"
+        mock_session = mock.Mock()
+        mock_session.send_and_wait.return_value = mock_response
+        mock_client = mock.Mock()
+        mock_client.create_session.return_value = mock_session
+        with mock.patch("pdf2zh.translator.CopilotClient", return_value=mock_client):
+            translator = GitHubCopilotTranslator(
+                lang_in="en", lang_out="zh", model=None, envs=self.default_envs
+            )
         self.assertEqual(translator._oauth_token, "ghp_testtoken")
-        self.assertEqual(translator.model, "openai/gpt-4o-mini")
+        self.assertEqual(translator.model, "gpt-4.1")
+        mock_client.start.assert_called_once()
+        mock_client.create_session.assert_called_once()
         self.assertEqual(
-            str(translator.client.base_url).rstrip("/"),
-            GitHubCopilotTranslator.COPILOT_API_BASE,
+            mock_client.create_session.call_args.kwargs["model"],
+            "gpt-4.1",
         )
-        # The token must be used directly; no editor-only token exchange.
-        self.assertEqual(translator.client.api_key, "ghp_testtoken")
+        self.assertEqual(
+            mock_client.create_session.call_args.kwargs["on_permission_request"].__name__,
+            "approve_all",
+        )
 
     def test_token_read_from_config_when_env_missing(self):
         """未设置环境变量时从本地凭证文件读取 token"""
+        mock_session = mock.Mock()
+        mock_client = mock.Mock()
+        mock_client.create_session.return_value = mock_session
         with mock.patch.object(
             GitHubCopilotTranslator,
             "_read_oauth_token_from_config",
             return_value="gho_fromconfig",
-        ):
+        ), mock.patch(
+            "pdf2zh.translator.CopilotClient", return_value=mock_client
+        ) as mock_client_ctor:
             translator = GitHubCopilotTranslator(
                 lang_in="en", lang_out="zh", model=None, envs={}
             )
         self.assertEqual(translator._oauth_token, "gho_fromconfig")
-        self.assertEqual(translator.client.api_key, "gho_fromconfig")
+        mock_client_ctor.assert_called_once_with(github_token="gho_fromconfig")
 
-    def test_bare_openai_model_is_prefixed(self):
-        """传入裸的 OpenAI 模型名时自动加上 ``openai/`` 前缀以兼容 GitHub Models"""
+    def test_legacy_publisher_model_is_normalized(self):
+        """兼容旧格式 ``openai/gpt-4o-mini``，传给 SDK 时只保留模型名"""
         envs = {
             "GITHUB_COPILOT_TOKEN": "ghp_testtoken",
-            "GITHUB_COPILOT_MODEL": "gpt-4o-mini",
+            "GITHUB_COPILOT_MODEL": "openai/gpt-4o-mini",
         }
-        translator = GitHubCopilotTranslator(
-            lang_in="en", lang_out="zh", model=None, envs=envs
+        mock_session = mock.Mock()
+        mock_client = mock.Mock()
+        mock_client.create_session.return_value = mock_session
+        with mock.patch("pdf2zh.translator.CopilotClient", return_value=mock_client):
+            translator = GitHubCopilotTranslator(
+                lang_in="en", lang_out="zh", model=None, envs=envs
+            )
+        self.assertEqual(translator.model, "gpt-4o-mini")
+        self.assertEqual(
+            mock_client.create_session.call_args.kwargs["model"],
+            "gpt-4o-mini",
         )
-        self.assertEqual(translator.model, "openai/gpt-4o-mini")
+
+    def test_do_translate_uses_sdk_response(self):
+        """翻译调用 send_and_wait 并返回 assistant.message 内容"""
+        mock_response = mock.Mock()
+        mock_response.data.content = "翻译结果"
+        mock_session = mock.Mock()
+        mock_session.send_and_wait.return_value = mock_response
+        mock_client = mock.Mock()
+        mock_client.create_session.return_value = mock_session
+        with mock.patch("pdf2zh.translator.CopilotClient", return_value=mock_client):
+            translator = GitHubCopilotTranslator(
+                lang_in="en", lang_out="zh", model=None, envs=self.default_envs
+            )
+        output = translator.do_translate("hello")
+        self.assertEqual(output, "翻译结果")
+        sent_prompt = mock_session.send_and_wait.call_args.args[0]
+        self.assertIn("Source Text: hello", sent_prompt)
+        self.assertEqual(mock_session.send_and_wait.call_args.kwargs["timeout"], 120.0)
+
+    def test_do_translate_missing_content_raises_error(self):
+        """SDK 返回无内容时抛出错误"""
+        mock_response = mock.Mock()
+        mock_response.data = object()
+        mock_session = mock.Mock()
+        mock_session.send_and_wait.return_value = mock_response
+        mock_client = mock.Mock()
+        mock_client.create_session.return_value = mock_session
+        with mock.patch("pdf2zh.translator.CopilotClient", return_value=mock_client):
+            translator = GitHubCopilotTranslator(
+                lang_in="en", lang_out="zh", model=None, envs=self.default_envs
+            )
+        with self.assertRaises(ValueError) as context:
+            translator.do_translate("hello")
+        self.assertIn("No response content", str(context.exception))
 
 
 class TestOllamaTranslator(unittest.TestCase):
