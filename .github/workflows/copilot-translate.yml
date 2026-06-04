@@ -52,7 +52,10 @@ jobs:
       - name: Translate a PDF with the github-copilot backend
         env:
           # The repository secret is named COPILOT_GITHUB_TOKEN; the translator
-          # reads the GITHUB_COPILOT_TOKEN environment variable.
+          # reads the GITHUB_COPILOT_TOKEN environment variable. The value
+          # should be a GitHub personal access token (or any token that grants
+          # access to GitHub Models) — it is sent directly as a Bearer token
+          # to https://models.github.ai/inference.
           GITHUB_COPILOT_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           GITHUB_COPILOT_MODEL: ${{ github.event.inputs.model }}
         run: |

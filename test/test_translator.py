@@ -161,8 +161,8 @@ class TestGitHubCopilotTranslator(unittest.TestCase):
     def setUp(self) -> None:
         ConfigManager.clear()
         self.default_envs = {
-            "GITHUB_COPILOT_TOKEN": "gho_testtoken",
-            "GITHUB_COPILOT_MODEL": "gpt-4o-mini",
+            "GITHUB_COPILOT_TOKEN": "ghp_testtoken",
+            "GITHUB_COPILOT_MODEL": "openai/gpt-4o-mini",
         }
 
     def test_missing_token_raises_error(self):
@@ -177,16 +177,18 @@ class TestGitHubCopilotTranslator(unittest.TestCase):
         self.assertIn("GITHUB_COPILOT_TOKEN is missing", str(context.exception))
 
     def test_initialization_with_token(self):
-        """使用有效的 OAuth token 初始化"""
+        """使用有效的 token 初始化：作为 Bearer token 直接调用 GitHub Models"""
         translator = GitHubCopilotTranslator(
             lang_in="en", lang_out="zh", model=None, envs=self.default_envs
         )
-        self.assertEqual(translator._oauth_token, "gho_testtoken")
-        self.assertEqual(translator.model, "gpt-4o-mini")
+        self.assertEqual(translator._oauth_token, "ghp_testtoken")
+        self.assertEqual(translator.model, "openai/gpt-4o-mini")
         self.assertEqual(
             str(translator.client.base_url).rstrip("/"),
             GitHubCopilotTranslator.COPILOT_API_BASE,
         )
+        # The token must be used directly; no editor-only token exchange.
+        self.assertEqual(translator.client.api_key, "ghp_testtoken")
 
     def test_token_read_from_config_when_env_missing(self):
         """未设置环境变量时从本地凭证文件读取 token"""
@@ -199,27 +201,18 @@ class TestGitHubCopilotTranslator(unittest.TestCase):
                 lang_in="en", lang_out="zh", model=None, envs={}
             )
         self.assertEqual(translator._oauth_token, "gho_fromconfig")
+        self.assertEqual(translator.client.api_key, "gho_fromconfig")
 
-    def test_refresh_session_token_updates_client(self):
-        """刷新会话 token 时会更新 client 的 api_key 并缓存"""
-        translator = GitHubCopilotTranslator(
-            lang_in="en", lang_out="zh", model=None, envs=self.default_envs
-        )
-        fake_response = mock.Mock()
-        fake_response.json.return_value = {
-            "token": "session_token_123",
-            "expires_at": 9999999999,
+    def test_bare_openai_model_is_prefixed(self):
+        """传入裸的 OpenAI 模型名时自动加上 ``openai/`` 前缀以兼容 GitHub Models"""
+        envs = {
+            "GITHUB_COPILOT_TOKEN": "ghp_testtoken",
+            "GITHUB_COPILOT_MODEL": "gpt-4o-mini",
         }
-        with mock.patch(
-            "pdf2zh.translator.requests.get", return_value=fake_response
-        ) as mock_get:
-            translator._refresh_session_token()
-            mock_get.assert_called_once()
-            self.assertEqual(translator._session_token, "session_token_123")
-            self.assertEqual(translator.client.api_key, "session_token_123")
-            # Cached token should not trigger another request.
-            translator._refresh_session_token()
-            mock_get.assert_called_once()
+        translator = GitHubCopilotTranslator(
+            lang_in="en", lang_out="zh", model=None, envs=envs
+        )
+        self.assertEqual(translator.model, "openai/gpt-4o-mini")
 
 
 class TestOllamaTranslator(unittest.TestCase):
