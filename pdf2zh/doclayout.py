@@ -19,6 +19,10 @@ except ImportError as e:
     raise
 
 logger = logging.getLogger(__name__)
+try:
+    _ORT_FAIL_ERROR = onnxruntime.capi.onnxruntime_pybind11_state.Fail
+except AttributeError:
+    _ORT_FAIL_ERROR = RuntimeError
 
 _BACKEND_PROVIDERS = {
     "cpu": ["CPUExecutionProvider"],
@@ -118,10 +122,26 @@ class OnnxModel(DocLayoutModel):
                 model_path = optimized_path
             else:
                 sess_options.optimized_model_filepath = optimized_path
-
-        self.model = onnxruntime.InferenceSession(
-            model_path, sess_options, providers=providers
-        )
+        fallback_model_path = self.model_path
+        try:
+            self.model = onnxruntime.InferenceSession(
+                model_path, sess_options, providers=providers
+            )
+        except _ORT_FAIL_ERROR as exc:
+            if model_path != fallback_model_path and "registered function/op" in str(
+                exc
+            ):
+                logger.warning(
+                    "Failed to load cached optimized model %s (%s). Falling back to %s.",
+                    model_path,
+                    exc,
+                    fallback_model_path,
+                )
+                self.model = onnxruntime.InferenceSession(
+                    fallback_model_path, sess_options, providers=providers
+                )
+            else:
+                raise
         logger.info("ONNX Runtime providers: %s", self.model.get_providers())
 
     @staticmethod

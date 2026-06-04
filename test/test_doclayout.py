@@ -5,6 +5,7 @@ from pdf2zh.doclayout import (
     OnnxModel,
     YoloResult,
     YoloBox,
+    _ORT_FAIL_ERROR,
 )
 
 
@@ -99,6 +100,42 @@ class TestYoloBox(unittest.TestCase):
         self.assertEqual(box.xyxy, box_data[:4])
         self.assertEqual(box.conf, box_data[4])
         self.assertEqual(box.cls, box_data[5])
+
+
+class TestOnnxModelOptimizedFallback(unittest.TestCase):
+    @patch("onnx.load")
+    @patch("os.path.exists")
+    @patch("onnxruntime.InferenceSession")
+    def test_fallback_on_incompatible_optimized_model(
+        self, mock_inference_session, mock_exists, mock_onnx_load
+    ):
+        mock_model = MagicMock()
+        mock_model.metadata_props = [
+            MagicMock(key="stride", value="32"),
+            MagicMock(key="names", value="['class1', 'class2']"),
+        ]
+        mock_onnx_load.return_value = mock_model
+        mock_exists.return_value = True
+
+        fallback_session = MagicMock()
+        mock_inference_session.side_effect = [
+            _ORT_FAIL_ERROR(
+                "Fatal error: com.microsoft.nchwc:Conv(-1) is not a registered function/op"
+            ),
+            fallback_session,
+        ]
+
+        model = OnnxModel("fake_model_path.onnx")
+
+        self.assertEqual(mock_inference_session.call_count, 2)
+        self.assertEqual(
+            mock_inference_session.call_args_list[0].args[0],
+            "fake_model_path.onnx.optimized",
+        )
+        self.assertEqual(
+            mock_inference_session.call_args_list[1].args[0], "fake_model_path.onnx"
+        )
+        self.assertIs(model.model, fallback_session)
 
 
 if __name__ == "__main__":

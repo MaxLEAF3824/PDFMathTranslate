@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import unicodedata
+from contextlib import suppress
 from copy import copy
 from string import Template
 from typing import cast
@@ -23,6 +24,13 @@ from tencentcloud.tmt.v20180321.tmt_client import TmtClient
 
 from pdf2zh.cache import TranslationCache
 from pdf2zh.config import ConfigManager
+
+try:
+    from copilot import CopilotClient
+    from copilot.session import PermissionHandler
+except ImportError:  # pragma: no cover
+    CopilotClient = None
+    PermissionHandler = None
 
 
 from tenacity import retry, retry_if_exception_type
@@ -1058,55 +1066,37 @@ class MiniMaxTranslator(OpenAITranslator):
 class GitHubCopilotTranslator(OpenAITranslator):
     """Translate using a GitHub Copilot subscription ("coding plan").
 
-    Calls go through `GitHub Models <https://models.github.ai>`_, the publicly
-    supported, OpenAI-compatible inference endpoint for Copilot's models. This
-    lets users reuse their paid Copilot plan (or the free GitHub Models tier) as
-    a translation backend.
+    Calls go through the official GitHub Copilot SDK.
 
-    Authentication uses a GitHub personal access token (or any token that
-    grants access to GitHub Models, including the ``GITHUB_TOKEN`` available in
-    GitHub Actions) sent as a standard ``Bearer`` token. Provide it through the
-    ``GITHUB_COPILOT_TOKEN`` environment variable. As a convenience, if the
-    variable is not set, the OAuth token created by the official GitHub Copilot
-    editor plugins (``~/.config/github-copilot/apps.json`` or ``hosts.json``) is
-    used as a fallback.
+    Authentication uses ``GITHUB_COPILOT_TOKEN`` when set. If absent, the OAuth
+    token created by official GitHub Copilot editor plugins
+    (``~/.config/github-copilot/apps.json`` or ``hosts.json``) is used.
 
-    The previous implementation called the editor-only endpoint
-    ``https://api.github.com/copilot_internal/v2/token`` to exchange the token
-    for a short-lived Copilot session token. That endpoint rejects regular
-    personal access tokens with ``403 Forbidden`` (it is intended only for the
-    official editor OAuth app), which broke this backend in CI and for any user
-    supplying a PAT. GitHub Models accepts PATs directly, so no exchange is
-    needed.
-
-    Model names follow the GitHub Models convention of ``<publisher>/<model>``
-    (e.g. ``openai/gpt-4o-mini``). For backward compatibility, plain OpenAI
-    model names (e.g. ``gpt-4o-mini``) are automatically prefixed with
-    ``openai/``.
+    ``GITHUB_COPILOT_MODEL`` defaults to ``gpt-4.1``. For backward
+    compatibility, legacy ``<publisher>/<model>`` values keep only the model
+    suffix when creating the SDK session.
     """
 
     name = "github-copilot"
     envs = {
         "GITHUB_COPILOT_TOKEN": None,
-        "GITHUB_COPILOT_MODEL": "openai/gpt-4o-mini",
+        "GITHUB_COPILOT_MODEL": "gpt-4.1",
     }
     CustomPrompt = True
-
-    # GitHub Models exposes an OpenAI-compatible API. The OpenAI Python client
-    # appends "/chat/completions" itself, so the base URL only needs to point at
-    # the inference root.
-    COPILOT_API_BASE = "https://models.github.ai/inference"
 
     def __init__(
         self, lang_in, lang_out, model, envs=None, prompt=None, ignore_cache=False
     ):
+        if CopilotClient is None or PermissionHandler is None:
+            raise ImportError(
+                "github-copilot-sdk is required for GitHub Copilot translator. "
+                "Install it with: pip install github-copilot-sdk"
+            )
         self.set_envs(envs)
         if not model:
             model = self.envs["GITHUB_COPILOT_MODEL"]
-        # GitHub Models requires "<publisher>/<model>" identifiers. Accept bare
-        # OpenAI model names (e.g. "gpt-4o-mini") for convenience.
-        if model and "/" not in model:
-            model = f"openai/{model}"
+        if model and "/" in model:
+            model = model.split("/", 1)[1]
         token = (
             self.envs.get("GITHUB_COPILOT_TOKEN")
             or self._read_oauth_token_from_config()
@@ -1115,19 +1105,40 @@ class GitHubCopilotTranslator(OpenAITranslator):
             raise ValueError(
                 "The GITHUB_COPILOT_TOKEN is missing. Set it to a GitHub "
                 "personal access token (or the OAuth token created by an "
-                "official GitHub Copilot editor plugin) with access to "
-                "GitHub Models / Copilot."
+                "official GitHub Copilot editor plugin) with access to Copilot."
             )
         self._oauth_token = token
-        super().__init__(
-            lang_in,
-            lang_out,
-            model,
-            base_url=self.COPILOT_API_BASE,
-            api_key=token,
-            ignore_cache=ignore_cache,
-            prompt=prompt,
+        BaseTranslator.__init__(self, lang_in, lang_out, model, ignore_cache)
+        self.prompttext = prompt
+        think_filter_regex = r"^<think>.+?</think>\n*"
+        self.think_filter_regex = re.compile(think_filter_regex, flags=re.DOTALL)
+        self.add_cache_impact_parameters("prompt", self.prompt("", self.prompttext))
+        self.add_cache_impact_parameters("think_filter_regex", think_filter_regex)
+        self._copilot_client = CopilotClient(github_token=token)
+        self._copilot_client.start()
+        self._copilot_session = self._copilot_client.create_session(
+            on_permission_request=PermissionHandler.approve_all,
+            model=self.model,
         )
+
+    def do_translate(self, text) -> str:
+        response = self._copilot_session.send_and_wait(
+            self.prompt(text, self.prompttext)[0]["content"],
+            timeout=120.0,
+        )
+        if response is None or not hasattr(response.data, "content"):
+            raise ValueError("No response content from GitHub Copilot SDK session.")
+        content = str(response.data.content).strip()
+        content = self.think_filter_regex.sub("", content).strip()
+        return content
+
+    def __del__(self):
+        with suppress(Exception):
+            if hasattr(self, "_copilot_session"):
+                self._copilot_session.disconnect()
+        with suppress(Exception):
+            if hasattr(self, "_copilot_client"):
+                self._copilot_client.stop()
 
     @staticmethod
     def _read_oauth_token_from_config():
