@@ -1079,10 +1079,16 @@ class GitHubCopilotTranslator(OpenAITranslator):
 
     COPILOT_API_BASE = "https://api.githubcopilot.com"
     COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
+    # These values mimic the official GitHub Copilot editor plugins; the Copilot
+    # API requires them and they may need updating if the API changes.
     EDITOR_VERSION = "vscode/1.95.0"
     PLUGIN_VERSION = "copilot-chat/0.22.0"
     USER_AGENT = "GitHubCopilotChat/0.22.0"
     INTEGRATION_ID = "vscode-chat"
+    # Refresh the session token this many seconds before it actually expires.
+    TOKEN_REFRESH_BUFFER_SECONDS = 60
+    # Fallback session lifetime (~25 min) when the API omits "expires_at".
+    DEFAULT_SESSION_DURATION_SECONDS = 1500
 
     def __init__(
         self, lang_in, lang_out, model, envs=None, prompt=None, ignore_cache=False
@@ -1147,7 +1153,9 @@ class GitHubCopilotTranslator(OpenAITranslator):
         """Exchange the OAuth token for a (cached) short-lived Copilot session token."""
         import time
 
-        if self._session_token and time.time() < self._session_expires_at - 60:
+        if self._session_token and time.time() < (
+            self._session_expires_at - self.TOKEN_REFRESH_BUFFER_SECONDS
+        ):
             return
         response = requests.get(
             self.COPILOT_TOKEN_URL,
@@ -1162,7 +1170,9 @@ class GitHubCopilotTranslator(OpenAITranslator):
         response.raise_for_status()
         data = response.json()
         self._session_token = data["token"]
-        self._session_expires_at = data.get("expires_at", time.time() + 1500)
+        self._session_expires_at = data.get(
+            "expires_at", time.time() + self.DEFAULT_SESSION_DURATION_SECONDS
+        )
         self.client.api_key = self._session_token
 
     def do_translate(self, text) -> str:
