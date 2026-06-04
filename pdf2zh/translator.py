@@ -1089,7 +1089,8 @@ class GitHubCopilotTranslator(OpenAITranslator):
     ):
         if CopilotClient is None or PermissionHandler is None:
             raise ImportError(
-                "github-copilot-sdk is required for GitHub Copilot translator."
+                "github-copilot-sdk is required for GitHub Copilot translator. "
+                "Install it with: pip install github-copilot-sdk"
             )
         self.set_envs(envs)
         if not model:
@@ -1109,7 +1110,7 @@ class GitHubCopilotTranslator(OpenAITranslator):
         self._oauth_token = token
         BaseTranslator.__init__(self, lang_in, lang_out, model, ignore_cache)
         self.prompttext = prompt
-        think_filter_regex = r"^<think>.+?\n*(</think>|\n)*(</think>)\n*"
+        think_filter_regex = r"^<think>.+?</think>\n*"
         self.think_filter_regex = re.compile(think_filter_regex, flags=re.DOTALL)
         self.add_cache_impact_parameters("prompt", self.prompt("", self.prompttext))
         self.add_cache_impact_parameters("think_filter_regex", think_filter_regex)
