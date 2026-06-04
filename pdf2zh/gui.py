@@ -43,6 +43,7 @@ from pdf2zh.translator import (
     GroqTranslator,
     DeepseekTranslator,
     OpenAIlikedTranslator,
+    GitHubCopilotTranslator,
     QwenMtTranslator,
     X302AITranslator,
 )
@@ -94,6 +95,7 @@ service_map: dict[str, BaseTranslator] = {
     "DeepSeek": DeepseekTranslator,
     "MiniMax": MiniMaxTranslator,
     "OpenAI-liked": OpenAIlikedTranslator,
+    "GitHub Copilot": GitHubCopilotTranslator,
     "Ali Qwen-Translation": QwenMtTranslator,
     "302.AI": X302AITranslator,
 }
@@ -425,6 +427,7 @@ def babeldoc_translate_file(**kwargs):
         GroqTranslator,
         DeepseekTranslator,
         OpenAIlikedTranslator,
+        GitHubCopilotTranslator,
         QwenMtTranslator,
         X302AITranslator,
     ]:

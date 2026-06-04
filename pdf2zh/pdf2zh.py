@@ -435,6 +435,7 @@ def yadt_main(parsed_args) -> int:
         GroqTranslator,
         DeepseekTranslator,
         OpenAIlikedTranslator,
+        GitHubCopilotTranslator,
         QwenMtTranslator,
         X302AITranslator,
     )
@@ -461,6 +462,7 @@ def yadt_main(parsed_args) -> int:
         GroqTranslator,
         DeepseekTranslator,
         OpenAIlikedTranslator,
+        GitHubCopilotTranslator,
         QwenMtTranslator,
         X302AITranslator,
     ]:
