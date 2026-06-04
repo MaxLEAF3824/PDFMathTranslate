@@ -6,7 +6,12 @@ from ollama import ResponseError as OllamaResponseError
 
 from pdf2zh import cache
 from pdf2zh.config import ConfigManager
-from pdf2zh.translator import BaseTranslator, OllamaTranslator, OpenAIlikedTranslator
+from pdf2zh.translator import (
+    BaseTranslator,
+    GitHubCopilotTranslator,
+    OllamaTranslator,
+    OpenAIlikedTranslator,
+)
 
 # Since it is necessary to test whether the functionality meets the expected requirements,
 # private functions and private methods are allowed to be called.
@@ -150,6 +155,71 @@ class TestOpenAIlikedTranslator(unittest.TestCase):
             self.default_envs["OPENAILIKED_BASE_URL"],
         )
         self.assertIsNone(translator.envs["OPENAILIKED_API_KEY"])
+
+
+class TestGitHubCopilotTranslator(unittest.TestCase):
+    def setUp(self) -> None:
+        ConfigManager.clear()
+        self.default_envs = {
+            "GITHUB_COPILOT_TOKEN": "gho_testtoken",
+            "GITHUB_COPILOT_MODEL": "gpt-4o-mini",
+        }
+
+    def test_missing_token_raises_error(self):
+        """缺失 GITHUB_COPILOT_TOKEN 且本地无凭证文件时抛出异常"""
+        with mock.patch.object(
+            GitHubCopilotTranslator, "_read_oauth_token_from_config", return_value=None
+        ):
+            with self.assertRaises(ValueError) as context:
+                GitHubCopilotTranslator(
+                    lang_in="en", lang_out="zh", model=None, envs={}
+                )
+        self.assertIn("GITHUB_COPILOT_TOKEN is missing", str(context.exception))
+
+    def test_initialization_with_token(self):
+        """使用有效的 OAuth token 初始化"""
+        translator = GitHubCopilotTranslator(
+            lang_in="en", lang_out="zh", model=None, envs=self.default_envs
+        )
+        self.assertEqual(translator._oauth_token, "gho_testtoken")
+        self.assertEqual(translator.model, "gpt-4o-mini")
+        self.assertEqual(
+            str(translator.client.base_url).rstrip("/"),
+            GitHubCopilotTranslator.COPILOT_API_BASE,
+        )
+
+    def test_token_read_from_config_when_env_missing(self):
+        """未设置环境变量时从本地凭证文件读取 token"""
+        with mock.patch.object(
+            GitHubCopilotTranslator,
+            "_read_oauth_token_from_config",
+            return_value="gho_fromconfig",
+        ):
+            translator = GitHubCopilotTranslator(
+                lang_in="en", lang_out="zh", model=None, envs={}
+            )
+        self.assertEqual(translator._oauth_token, "gho_fromconfig")
+
+    def test_refresh_session_token_updates_client(self):
+        """刷新会话 token 时会更新 client 的 api_key 并缓存"""
+        translator = GitHubCopilotTranslator(
+            lang_in="en", lang_out="zh", model=None, envs=self.default_envs
+        )
+        fake_response = mock.Mock()
+        fake_response.json.return_value = {
+            "token": "session_token_123",
+            "expires_at": 9999999999,
+        }
+        with mock.patch(
+            "pdf2zh.translator.requests.get", return_value=fake_response
+        ) as mock_get:
+            translator._refresh_session_token()
+            mock_get.assert_called_once()
+            self.assertEqual(translator._session_token, "session_token_123")
+            self.assertEqual(translator.client.api_key, "session_token_123")
+            # Cached token should not trigger another request.
+            translator._refresh_session_token()
+            mock_get.assert_called_once()
 
 
 class TestOllamaTranslator(unittest.TestCase):

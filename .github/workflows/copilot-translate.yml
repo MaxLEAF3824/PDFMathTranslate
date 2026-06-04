@@ -1,0 +1,69 @@
+name: Translate PDF with GitHub Copilot
+
+# Manually triggered end-to-end test of the `github-copilot` translation
+# backend. It is intentionally NOT run on pull_request so the
+# COPILOT_GITHUB_TOKEN secret is never exposed to forked PRs.
+on:
+  workflow_dispatch:
+    inputs:
+      pdf:
+        description: "Path to the PDF file to translate"
+        required: false
+        default: "./test/file/translate.cli.plain.text.pdf"
+      model:
+        description: "Copilot model to use"
+        required: false
+        default: "gpt-4o-mini"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: checkout babeldoc metadata
+        uses: actions/checkout@v6
+        with:
+          repository: funstory-ai/BabelDOC
+          path: babeldoctemp1234567
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: babeldoc/assets/embedding_assets_metadata.py
+      - name: Cached Assets
+        id: cache-assets
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/babeldoc
+          key: test-1-babeldoc-assets-${{ hashFiles('babeldoctemp1234567/babeldoc/assets/embedding_assets_metadata.py') }}
+      - uses: actions/checkout@v6
+      - name: Setup uv with Python
+        uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - name: Install dependencies
+        run: uv sync
+      - name: Translate a PDF with the github-copilot backend
+        env:
+          # The repository secret is named COPILOT_GITHUB_TOKEN; the translator
+          # reads the GITHUB_COPILOT_TOKEN environment variable.
+          GITHUB_COPILOT_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GITHUB_COPILOT_MODEL: ${{ github.event.inputs.model }}
+        run: |
+          if [ -z "$GITHUB_COPILOT_TOKEN" ]; then
+            echo "::error::The COPILOT_GITHUB_TOKEN secret is not set. Add it in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          uv run pdf2zh "${{ github.event.inputs.pdf }}" -s github-copilot -o ./test/file
+      - name: Upload translated results
+        uses: actions/upload-artifact@v7
+        with:
+          name: copilot-translate-results
+          path: ./test/file/
+          retention-days: 7
