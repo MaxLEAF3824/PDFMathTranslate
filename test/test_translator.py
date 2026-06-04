@@ -197,7 +197,9 @@ class TestGitHubCopilotTranslator(unittest.TestCase):
             "gpt-4.1",
         )
         self.assertEqual(
-            mock_client.create_session.call_args.kwargs["on_permission_request"].__name__,
+            mock_client.create_session.call_args.kwargs[
+                "on_permission_request"
+            ].__name__,
             "approve_all",
         )
 
@@ -206,13 +208,16 @@ class TestGitHubCopilotTranslator(unittest.TestCase):
         mock_session = mock.Mock()
         mock_client = mock.Mock()
         mock_client.create_session.return_value = mock_session
-        with mock.patch.object(
-            GitHubCopilotTranslator,
-            "_read_oauth_token_from_config",
-            return_value="gho_fromconfig",
-        ), mock.patch(
-            "pdf2zh.translator.CopilotClient", return_value=mock_client
-        ) as mock_client_ctor:
+        with (
+            mock.patch.object(
+                GitHubCopilotTranslator,
+                "_read_oauth_token_from_config",
+                return_value="gho_fromconfig",
+            ),
+            mock.patch(
+                "pdf2zh.translator.CopilotClient", return_value=mock_client
+            ) as mock_client_ctor,
+        ):
             translator = GitHubCopilotTranslator(
                 lang_in="en", lang_out="zh", model=None, envs={}
             )
